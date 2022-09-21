@@ -195,16 +195,16 @@ install_requires = [
 ]
 
 setup(
-    name="diffusers",
-    version="0.4.0.dev0",  # expected format is one of x.y.z.dev0, or x.y.z.rc1 or x.y.z (no to dashes, yes to dots)
+    name="diffusers-unchained",
+    version="0.3.0",  # expected format is one of x.y.z.dev0, or x.y.z.rc1 or x.y.z (no to dashes, yes to dots)
     description="Diffusers",
     long_description=open("README.md", "r", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     keywords="deep learning",
     license="Apache",
-    author="The HuggingFace team",
-    author_email="patrick@huggingface.co",
-    url="https://github.com/huggingface/diffusers",
+    author="The HuggingFace Team ft. Mage Team",
+    author_email="greg@ollano.com",
+    url="https://github.com/ghunkins/diffusers-unchained",
     package_dir={"": "src"},
     packages=find_packages("src"),
     include_package_data=True,

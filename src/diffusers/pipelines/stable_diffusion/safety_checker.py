@@ -69,8 +69,7 @@ class StableDiffusionSafetyChecker(PreTrainedModel):
 
         if any(has_nsfw_concepts):
             logger.warning(
-                "Potential NSFW content was detected in one or more images. A black image will be returned instead."
-                " Try again with a different prompt and/or seed."
+                "Potential NSFW content was detected in one or more images. Please use caution."
             )
 
         return images, has_nsfw_concepts
