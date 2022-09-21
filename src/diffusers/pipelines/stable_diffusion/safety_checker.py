@@ -97,6 +97,4 @@ class StableDiffusionSafetyChecker(PreTrainedModel):
         # concept_scores = concept_scores.round(decimals=3)
         has_nsfw_concepts = torch.any(concept_scores > 0, dim=1)
 
-        images[has_nsfw_concepts] = 0.0  # black image
-
         return images, has_nsfw_concepts
