@@ -27,8 +27,8 @@ from huggingface_hub import hf_hub_download
 from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError
 from requests import HTTPError
 
+from . import is_torch_available
 from .modeling_flax_pytorch_utils import convert_pytorch_state_dict_to_flax
-from .modeling_utils import load_state_dict
 from .utils import (
     CONFIG_NAME,
     DIFFUSERS_CACHE,
@@ -310,26 +310,31 @@ class FlaxModelMixin:
         )
 
         # Load model
-        if os.path.isdir(pretrained_model_name_or_path):
+        pretrained_path_with_subfolder = (
+            pretrained_model_name_or_path
+            if subfolder is None
+            else os.path.join(pretrained_model_name_or_path, subfolder)
+        )
+        if os.path.isdir(pretrained_path_with_subfolder):
             if from_pt:
-                if not os.path.isfile(os.path.join(pretrained_model_name_or_path, WEIGHTS_NAME)):
+                if not os.path.isfile(os.path.join(pretrained_path_with_subfolder, WEIGHTS_NAME)):
                     raise EnvironmentError(
-                        f"Error no file named {WEIGHTS_NAME} found in directory {pretrained_model_name_or_path} "
+                        f"Error no file named {WEIGHTS_NAME} found in directory {pretrained_path_with_subfolder} "
                     )
-                model_file = os.path.join(pretrained_model_name_or_path, WEIGHTS_NAME)
-            elif os.path.isfile(os.path.join(pretrained_model_name_or_path, FLAX_WEIGHTS_NAME)):
+                model_file = os.path.join(pretrained_path_with_subfolder, WEIGHTS_NAME)
+            elif os.path.isfile(os.path.join(pretrained_path_with_subfolder, FLAX_WEIGHTS_NAME)):
                 # Load from a Flax checkpoint
-                model_file = os.path.join(pretrained_model_name_or_path, FLAX_WEIGHTS_NAME)
+                model_file = os.path.join(pretrained_path_with_subfolder, FLAX_WEIGHTS_NAME)
             # Check if pytorch weights exist instead
-            elif os.path.isfile(os.path.join(pretrained_model_name_or_path, WEIGHTS_NAME)):
+            elif os.path.isfile(os.path.join(pretrained_path_with_subfolder, WEIGHTS_NAME)):
                 raise EnvironmentError(
-                    f"{WEIGHTS_NAME} file found in directory {pretrained_model_name_or_path}. Please load the model"
+                    f"{WEIGHTS_NAME} file found in directory {pretrained_path_with_subfolder}. Please load the model"
                     " using  `from_pt=True`."
                 )
             else:
                 raise EnvironmentError(
                     f"Error no file named {FLAX_WEIGHTS_NAME} or {WEIGHTS_NAME} found in directory "
-                    f"{pretrained_model_name_or_path}."
+                    f"{pretrained_path_with_subfolder}."
                 )
         else:
             try:
@@ -352,7 +357,7 @@ class FlaxModelMixin:
                     f"{pretrained_model_name_or_path} is not a local folder and is not a valid model identifier "
                     "listed on 'https://huggingface.co/models'\nIf this is a private repository, make sure to pass a "
                     "token having permission to this repo with `use_auth_token` or log in with `huggingface-cli "
-                    "login` and pass `use_auth_token=True`."
+                    "login`."
                 )
             except RevisionNotFoundError:
                 raise EnvironmentError(
@@ -386,6 +391,14 @@ class FlaxModelMixin:
                 )
 
         if from_pt:
+            if is_torch_available():
+                from .modeling_utils import load_state_dict
+            else:
+                raise EnvironmentError(
+                    "Can't load the model in PyTorch format because PyTorch is not installed. "
+                    "Please, install PyTorch or use native Flax weights."
+                )
+
             # Step 1: Get the pytorch file
             pytorch_model_file = load_state_dict(model_file)
 
@@ -431,9 +444,6 @@ class FlaxModelMixin:
             )
             cls._missing_keys = missing_keys
 
-        # Mistmatched keys contains tuples key/shape1/shape2 of weights in the checkpoint that have a shape not
-        # matching the weights in the model.
-        mismatched_keys = []
         for key in state.keys():
             if key in shape_state and state[key].shape != shape_state[key].shape:
                 raise ValueError(
@@ -461,25 +471,12 @@ class FlaxModelMixin:
                 f" {pretrained_model_name_or_path} and are newly initialized: {missing_keys}\nYou should probably"
                 " TRAIN this model on a down-stream task to be able to use it for predictions and inference."
             )
-        elif len(mismatched_keys) == 0:
+        else:
             logger.info(
                 f"All the weights of {model.__class__.__name__} were initialized from the model checkpoint at"
                 f" {pretrained_model_name_or_path}.\nIf your task is similar to the task the model of the checkpoint"
                 f" was trained on, you can already use {model.__class__.__name__} for predictions without further"
                 " training."
-            )
-        if len(mismatched_keys) > 0:
-            mismatched_warning = "\n".join(
-                [
-                    f"- {key}: found shape {shape1} in the checkpoint and {shape2} in the model instantiated"
-                    for key, shape1, shape2 in mismatched_keys
-                ]
-            )
-            logger.warning(
-                f"Some weights of {model.__class__.__name__} were not initialized from the model checkpoint at"
-                f" {pretrained_model_name_or_path} and are newly initialized because the shapes did not"
-                f" match:\n{mismatched_warning}\nYou should probably TRAIN this model on a down-stream task to be able"
-                " to use it for predictions and inference."
             )
 
         # dictionary of key: dtypes for the model params
