@@ -26,6 +26,7 @@ from .scheduling_utils import SchedulerMixin
 
 
 @dataclass
+# Copied from diffusers.schedulers.scheduling_ddpm.DDPMSchedulerOutput with DDPM->LMSDiscrete
 class LMSDiscreteSchedulerOutput(BaseOutput):
     """
     Output class for the scheduler's step function output.
@@ -66,6 +67,14 @@ class LMSDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
     """
 
+    _compatible_classes = [
+        "DDIMScheduler",
+        "DDPMScheduler",
+        "PNDMScheduler",
+        "EulerDiscreteScheduler",
+        "EulerAncestralDiscreteScheduler",
+    ]
+
     @register_to_config
     def __init__(
         self,
@@ -74,15 +83,7 @@ class LMSDiscreteScheduler(SchedulerMixin, ConfigMixin):
         beta_end: float = 0.02,
         beta_schedule: str = "linear",
         trained_betas: Optional[np.ndarray] = None,
-        **kwargs,
     ):
-        deprecate(
-            "tensor_format",
-            "0.5.0",
-            "If you're running your code in PyTorch, you can safely remove this argument.",
-            take_from=kwargs,
-        )
-
         if trained_betas is not None:
             self.betas = torch.from_numpy(trained_betas)
         elif beta_schedule == "linear":
@@ -217,7 +218,7 @@ class LMSDiscreteScheduler(SchedulerMixin, ConfigMixin):
         ):
             deprecate(
                 "timestep as an index",
-                "0.5.0",
+                "0.8.0",
                 "Passing integer indices (e.g. from `enumerate(timesteps)`) as timesteps to"
                 " `LMSDiscreteScheduler.step()` will not be supported in future versions. Make sure to pass"
                 " one of the `scheduler.timesteps` as a timestep.",
@@ -257,13 +258,22 @@ class LMSDiscreteScheduler(SchedulerMixin, ConfigMixin):
         noise: torch.FloatTensor,
         timesteps: torch.FloatTensor,
     ) -> torch.FloatTensor:
-        sigmas = self.sigmas.to(original_samples.device)
-        schedule_timesteps = self.timesteps.to(original_samples.device)
-        timesteps = timesteps.to(original_samples.device)
+        # Make sure sigmas and timesteps have the same device and dtype as original_samples
+        self.sigmas = self.sigmas.to(device=original_samples.device, dtype=original_samples.dtype)
+        if original_samples.device.type == "mps" and torch.is_floating_point(timesteps):
+            # mps does not support float64
+            self.timesteps = self.timesteps.to(original_samples.device, dtype=torch.float32)
+            timesteps = timesteps.to(original_samples.device, dtype=torch.float32)
+        else:
+            self.timesteps = self.timesteps.to(original_samples.device)
+            timesteps = timesteps.to(original_samples.device)
+
+        schedule_timesteps = self.timesteps
+
         if isinstance(timesteps, torch.IntTensor) or isinstance(timesteps, torch.LongTensor):
             deprecate(
                 "timesteps as indices",
-                "0.5.0",
+                "0.8.0",
                 "Passing integer indices  (e.g. from `enumerate(timesteps)`) as timesteps to"
                 " `LMSDiscreteScheduler.add_noise()` will not be supported in future versions. Make sure to"
                 " pass values from `scheduler.timesteps` as timesteps.",
@@ -273,7 +283,7 @@ class LMSDiscreteScheduler(SchedulerMixin, ConfigMixin):
         else:
             step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
 
-        sigma = sigmas[step_indices].flatten()
+        sigma = self.sigmas[step_indices].flatten()
         while len(sigma.shape) < len(original_samples.shape):
             sigma = sigma.unsqueeze(-1)
 
