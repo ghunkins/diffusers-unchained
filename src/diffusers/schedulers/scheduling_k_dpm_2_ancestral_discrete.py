@@ -18,8 +18,8 @@ import numpy as np
 import torch
 
 from ..configuration_utils import ConfigMixin, register_to_config
-from ..utils import _COMPATIBLE_STABLE_DIFFUSION_SCHEDULERS
-from .scheduling_utils import SchedulerMixin, SchedulerOutput
+from ..utils import randn_tensor
+from .scheduling_utils import KarrasDiffusionSchedulers, SchedulerMixin, SchedulerOutput
 
 
 class KDPM2AncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
@@ -49,7 +49,7 @@ class KDPM2AncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
             https://imagen.research.google/video/paper.pdf)
     """
 
-    _compatibles = _COMPATIBLE_STABLE_DIFFUSION_SCHEDULERS.copy()
+    _compatibles = [e.name for e in KarrasDiffusionSchedulers]
     order = 2
 
     @register_to_config
@@ -161,16 +161,16 @@ class KDPM2AncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
         # standard deviation of the initial noise distribution
         self.init_noise_sigma = self.sigmas.max()
 
-        timesteps = torch.from_numpy(timesteps).to(device)
-        timesteps_interpol = self.sigma_to_t(sigmas_interpol).to(device)
-        interleaved_timesteps = torch.stack((timesteps_interpol[:-2, None], timesteps[1:, None]), dim=-1).flatten()
-        timesteps = torch.cat([timesteps[:1], interleaved_timesteps])
-
         if str(device).startswith("mps"):
             # mps does not support float64
-            self.timesteps = timesteps.to(device, dtype=torch.float32)
+            timesteps = torch.from_numpy(timesteps).to(device, dtype=torch.float32)
         else:
-            self.timesteps = timesteps
+            timesteps = torch.from_numpy(timesteps).to(device)
+
+        timesteps_interpol = self.sigma_to_t(sigmas_interpol).to(device)
+        interleaved_timesteps = torch.stack((timesteps_interpol[:-2, None], timesteps[1:, None]), dim=-1).flatten()
+
+        self.timesteps = torch.cat([timesteps[:1], interleaved_timesteps])
 
         self.sample = None
 
@@ -243,15 +243,7 @@ class KDPM2AncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
         sigma_hat = sigma * (gamma + 1)  # Note: sigma_hat == sigma for now
 
         device = model_output.device
-        if device.type == "mps":
-            # randn does not work reproducibly on mps
-            noise = torch.randn(model_output.shape, dtype=model_output.dtype, device="cpu", generator=generator).to(
-                device
-            )
-        else:
-            noise = torch.randn(model_output.shape, dtype=model_output.dtype, device=device, generator=generator).to(
-                device
-            )
+        noise = randn_tensor(model_output.shape, dtype=model_output.dtype, device=device, generator=generator)
 
         # 1. compute predicted original sample (x_0) from sigma-scaled predicted noise
         if self.config.prediction_type == "epsilon":

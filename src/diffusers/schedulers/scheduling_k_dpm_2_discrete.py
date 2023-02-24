@@ -18,8 +18,7 @@ import numpy as np
 import torch
 
 from ..configuration_utils import ConfigMixin, register_to_config
-from ..utils import _COMPATIBLE_STABLE_DIFFUSION_SCHEDULERS
-from .scheduling_utils import SchedulerMixin, SchedulerOutput
+from .scheduling_utils import KarrasDiffusionSchedulers, SchedulerMixin, SchedulerOutput
 
 
 class KDPM2DiscreteScheduler(SchedulerMixin, ConfigMixin):
@@ -49,7 +48,7 @@ class KDPM2DiscreteScheduler(SchedulerMixin, ConfigMixin):
             https://imagen.research.google/video/paper.pdf)
     """
 
-    _compatibles = _COMPATIBLE_STABLE_DIFFUSION_SCHEDULERS.copy()
+    _compatibles = [e.name for e in KarrasDiffusionSchedulers]
     order = 2
 
     @register_to_config
@@ -150,18 +149,17 @@ class KDPM2DiscreteScheduler(SchedulerMixin, ConfigMixin):
         # standard deviation of the initial noise distribution
         self.init_noise_sigma = self.sigmas.max()
 
-        timesteps = torch.from_numpy(timesteps).to(device)
+        if str(device).startswith("mps"):
+            # mps does not support float64
+            timesteps = torch.from_numpy(timesteps).to(device, dtype=torch.float32)
+        else:
+            timesteps = torch.from_numpy(timesteps).to(device)
 
         # interpolate timesteps
         timesteps_interpol = self.sigma_to_t(sigmas_interpol).to(device)
         interleaved_timesteps = torch.stack((timesteps_interpol[1:-1, None], timesteps[1:, None]), dim=-1).flatten()
-        timesteps = torch.cat([timesteps[:1], interleaved_timesteps])
 
-        if str(device).startswith("mps"):
-            # mps does not support float64
-            self.timesteps = timesteps.to(torch.float32)
-        else:
-            self.timesteps = timesteps
+        self.timesteps = torch.cat([timesteps[:1], interleaved_timesteps])
 
         self.sample = None
 

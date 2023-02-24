@@ -15,7 +15,6 @@
 import numpy as np
 import torch
 import torch.nn as nn
-
 from transformers import CLIPConfig, CLIPVisionModel, PreTrainedModel
 
 from ...utils import logging
@@ -52,7 +51,7 @@ class StableDiffusionSafetyChecker(PreTrainedModel):
         pooled_output = self.vision_model(clip_input)[1]  # pooled_output
         image_embeds = self.visual_projection(pooled_output)
 
-        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
+        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
         special_cos_dist = cosine_distance(image_embeds, self.special_care_embeds).cpu().float().numpy()
         cos_dist = cosine_distance(image_embeds, self.concept_embeds).cpu().float().numpy()
 
@@ -84,9 +83,14 @@ class StableDiffusionSafetyChecker(PreTrainedModel):
 
         has_nsfw_concepts = [len(res["bad_concepts"]) > 0 for res in result]
 
+        for idx, has_nsfw_concept in enumerate(has_nsfw_concepts):
+            if has_nsfw_concept:
+                images[idx] = np.zeros(images[idx].shape)  # black image
+
         if any(has_nsfw_concepts):
             logger.warning(
-                "Potential NSFW content was detected in one or more images. Please use caution."
+                "Potential NSFW content was detected in one or more images. A black image will be returned instead."
+                " Try again with a different prompt and/or seed."
             )
 
         return images, has_nsfw_concepts
@@ -112,5 +116,7 @@ class StableDiffusionSafetyChecker(PreTrainedModel):
         concept_scores = (cos_dist - self.concept_embeds_weights) + special_adjustment
         # concept_scores = concept_scores.round(decimals=3)
         has_nsfw_concepts = torch.any(concept_scores > 0, dim=1)
+
+        images[has_nsfw_concepts] = 0.0  # black image
 
         return images, has_nsfw_concepts
