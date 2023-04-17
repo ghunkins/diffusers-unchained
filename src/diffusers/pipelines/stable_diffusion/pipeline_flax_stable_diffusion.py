@@ -1,4 +1,4 @@
-# Copyright 2022 The HuggingFace Team. All rights reserved.
+# Copyright 2023 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,26 +16,25 @@ import warnings
 from functools import partial
 from typing import Dict, List, Optional, Union
 
-import numpy as np
-
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax.core.frozen_dict import FrozenDict
 from flax.jax_utils import unreplicate
 from flax.training.common_utils import shard
 from packaging import version
 from PIL import Image
-from transformers import CLIPFeatureExtractor, CLIPTokenizer, FlaxCLIPTextModel
+from transformers import CLIPImageProcessor, CLIPTokenizer, FlaxCLIPTextModel
 
 from ...models import FlaxAutoencoderKL, FlaxUNet2DConditionModel
-from ...pipeline_flax_utils import FlaxDiffusionPipeline
 from ...schedulers import (
     FlaxDDIMScheduler,
     FlaxDPMSolverMultistepScheduler,
     FlaxLMSDiscreteScheduler,
     FlaxPNDMScheduler,
 )
-from ...utils import deprecate, logging
+from ...utils import deprecate, logging, replace_example_docstring
+from ..pipeline_flax_utils import FlaxDiffusionPipeline
 from . import FlaxStableDiffusionPipelineOutput
 from .safety_checker_flax import FlaxStableDiffusionSafetyChecker
 
@@ -44,6 +43,39 @@ logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 # Set to True to use python for loop instead of jax.fori_loop for easier debugging
 DEBUG = False
+
+EXAMPLE_DOC_STRING = """
+    Examples:
+        ```py
+        >>> import jax
+        >>> import numpy as np
+        >>> from flax.jax_utils import replicate
+        >>> from flax.training.common_utils import shard
+
+        >>> from diffusers import FlaxStableDiffusionPipeline
+
+        >>> pipeline, params = FlaxStableDiffusionPipeline.from_pretrained(
+        ...     "runwayml/stable-diffusion-v1-5", revision="bf16", dtype=jax.numpy.bfloat16
+        ... )
+
+        >>> prompt = "a photo of an astronaut riding a horse on mars"
+
+        >>> prng_seed = jax.random.PRNGKey(0)
+        >>> num_inference_steps = 50
+
+        >>> num_samples = jax.device_count()
+        >>> prompt = num_samples * [prompt]
+        >>> prompt_ids = pipeline.prepare_inputs(prompt)
+        # shard inputs and rng
+
+        >>> params = replicate(params)
+        >>> prng_seed = jax.random.split(prng_seed, jax.device_count())
+        >>> prompt_ids = shard(prompt_ids)
+
+        >>> images = pipeline(prompt_ids, params, prng_seed, num_inference_steps, jit=True).images
+        >>> images = pipeline.numpy_to_pil(np.asarray(images.reshape((num_samples,) + images.shape[-3:])))
+        ```
+"""
 
 
 class FlaxStableDiffusionPipeline(FlaxDiffusionPipeline):
@@ -71,7 +103,7 @@ class FlaxStableDiffusionPipeline(FlaxDiffusionPipeline):
         safety_checker ([`FlaxStableDiffusionSafetyChecker`]):
             Classification module that estimates whether generated images could be considered offensive or harmful.
             Please, refer to the [model card](https://huggingface.co/runwayml/stable-diffusion-v1-5) for details.
-        feature_extractor ([`CLIPFeatureExtractor`]):
+        feature_extractor ([`CLIPImageProcessor`]):
             Model that extracts features from generated images to be used as inputs for the `safety_checker`.
     """
 
@@ -85,7 +117,7 @@ class FlaxStableDiffusionPipeline(FlaxDiffusionPipeline):
             FlaxDDIMScheduler, FlaxPNDMScheduler, FlaxLMSDiscreteScheduler, FlaxDPMSolverMultistepScheduler
         ],
         safety_checker: FlaxStableDiffusionSafetyChecker,
-        feature_extractor: CLIPFeatureExtractor,
+        feature_extractor: CLIPImageProcessor,
         dtype: jnp.dtype = jnp.float32,
     ):
         super().__init__()
@@ -184,23 +216,19 @@ class FlaxStableDiffusionPipeline(FlaxDiffusionPipeline):
         self,
         prompt_ids: jnp.array,
         params: Union[Dict, FrozenDict],
-        prng_seed: jax.random.PRNGKey,
-        num_inference_steps: int = 50,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
-        guidance_scale: float = 7.5,
+        prng_seed: jax.random.KeyArray,
+        num_inference_steps: int,
+        height: int,
+        width: int,
+        guidance_scale: float,
         latents: Optional[jnp.array] = None,
-        neg_prompt_ids: jnp.array = None,
+        neg_prompt_ids: Optional[jnp.array] = None,
     ):
-        # 0. Default height and width to unet
-        height = height or self.unet.config.sample_size * self.vae_scale_factor
-        width = width or self.unet.config.sample_size * self.vae_scale_factor
-
         if height % 8 != 0 or width % 8 != 0:
             raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
 
         # get prompt text embeddings
-        text_embeddings = self.text_encoder(prompt_ids, params=params["text_encoder"])[0]
+        prompt_embeds = self.text_encoder(prompt_ids, params=params["text_encoder"])[0]
 
         # TODO: currently it is assumed `do_classifier_free_guidance = guidance_scale > 1.0`
         # implement this conditional `do_classifier_free_guidance = guidance_scale > 1.0`
@@ -214,12 +242,15 @@ class FlaxStableDiffusionPipeline(FlaxDiffusionPipeline):
             ).input_ids
         else:
             uncond_input = neg_prompt_ids
-        uncond_embeddings = self.text_encoder(uncond_input, params=params["text_encoder"])[0]
-        context = jnp.concatenate([uncond_embeddings, text_embeddings])
+        negative_prompt_embeds = self.text_encoder(uncond_input, params=params["text_encoder"])[0]
+        context = jnp.concatenate([negative_prompt_embeds, prompt_embeds])
+
+        # Ensure model output will be `float32` before going into the scheduler
+        guidance_scale = jnp.array([guidance_scale], dtype=jnp.float32)
 
         latents_shape = (
             batch_size,
-            self.unet.in_channels,
+            self.unet.config.in_channels,
             height // self.vae_scale_factor,
             width // self.vae_scale_factor,
         )
@@ -261,7 +292,8 @@ class FlaxStableDiffusionPipeline(FlaxDiffusionPipeline):
         )
 
         # scale the initial noise by the standard deviation required by the scheduler
-        latents = latents * self.scheduler.init_noise_sigma
+        latents = latents * params["scheduler"].init_noise_sigma
+
         if DEBUG:
             # run with python for loop
             for i in range(num_inference_steps):
@@ -270,25 +302,26 @@ class FlaxStableDiffusionPipeline(FlaxDiffusionPipeline):
             latents, _ = jax.lax.fori_loop(0, num_inference_steps, loop_body, (latents, scheduler_state))
 
         # scale and decode the image latents with vae
-        latents = 1 / 0.18215 * latents
+        latents = 1 / self.vae.config.scaling_factor * latents
         image = self.vae.apply({"params": params["vae"]}, latents, method=self.vae.decode).sample
 
         image = (image / 2 + 0.5).clip(0, 1).transpose(0, 2, 3, 1)
         return image
 
+    @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
         self,
         prompt_ids: jnp.array,
         params: Union[Dict, FrozenDict],
-        prng_seed: jax.random.PRNGKey,
+        prng_seed: jax.random.KeyArray,
         num_inference_steps: int = 50,
         height: Optional[int] = None,
         width: Optional[int] = None,
         guidance_scale: Union[float, jnp.array] = 7.5,
         latents: jnp.array = None,
+        neg_prompt_ids: jnp.array = None,
         return_dict: bool = True,
         jit: bool = False,
-        neg_prompt_ids: jnp.array = None,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -320,6 +353,8 @@ class FlaxStableDiffusionPipeline(FlaxDiffusionPipeline):
                 Whether or not to return a [`~pipelines.stable_diffusion.FlaxStableDiffusionPipelineOutput`] instead of
                 a plain tuple.
 
+        Examples:
+
         Returns:
             [`~pipelines.stable_diffusion.FlaxStableDiffusionPipelineOutput`] or `tuple`:
             [`~pipelines.stable_diffusion.FlaxStableDiffusionPipelineOutput`] if `return_dict` is True, otherwise a
@@ -337,7 +372,7 @@ class FlaxStableDiffusionPipeline(FlaxDiffusionPipeline):
             guidance_scale = jnp.array([guidance_scale] * prompt_ids.shape[0])
             if len(prompt_ids.shape) > 2:
                 # Assume sharded
-                guidance_scale = guidance_scale.reshape(prompt_ids.shape[:2])
+                guidance_scale = guidance_scale[:, None]
 
         if jit:
             images = _p_generate(

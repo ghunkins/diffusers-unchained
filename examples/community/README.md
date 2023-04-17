@@ -25,6 +25,12 @@ If a community doesn't work as expected, please open an issue and ping the autho
 | K-Diffusion Stable Diffusion | Run Stable Diffusion with any of [K-Diffusion's samplers](https://github.com/crowsonkb/k-diffusion/blob/master/k_diffusion/sampling.py) | [Stable Diffusion with K Diffusion](#stable-diffusion-with-k-diffusion) | -  | [Patrick von Platen](https://github.com/patrickvonplaten/) |
 | Checkpoint Merger Pipeline | Diffusion Pipeline that enables merging of saved model checkpoints | [Checkpoint Merger Pipeline](#checkpoint-merger-pipeline)                   | -                                                                                                                                                                                                                  | [Naga Sai Abhinay Devarinti](https://github.com/Abhinay1997/) | 
 Stable Diffusion v1.1-1.4 Comparison | Run all 4 model checkpoints for Stable Diffusion and compare their results together | [Stable Diffusion Comparison](#stable-diffusion-comparisons) | - | [Suvaditya Mukherjee](https://github.com/suvadityamuk) |
+MagicMix | Diffusion Pipeline for semantic mixing of an image and a text prompt | [MagicMix](#magic-mix) | - | [Partho Das](https://github.com/daspartho) |
+| Stable UnCLIP | Diffusion Pipeline for combining prior model (generate clip image embedding from text, UnCLIPPipeline `"kakaobrain/karlo-v1-alpha"`) and decoder pipeline (decode clip image embedding to image, StableDiffusionImageVariationPipeline `"lambdalabs/sd-image-variations-diffusers"` ). | [Stable UnCLIP](#stable-unclip) | -  |[Ray Wang](https://wrong.wang) |
+| UnCLIP Text Interpolation Pipeline | Diffusion Pipeline that allows passing two prompts and produces images while interpolating between the text-embeddings of the two prompts | [UnCLIP Text Interpolation Pipeline](#unclip-text-interpolation-pipeline)                   | -                                                                                                                                                                                                                  | [Naga Sai Abhinay Devarinti](https://github.com/Abhinay1997/) | 
+| UnCLIP Image Interpolation Pipeline | Diffusion Pipeline that allows passing two images/image_embeddings and produces images while interpolating between their image-embeddings | [UnCLIP Image Interpolation Pipeline](#unclip-image-interpolation-pipeline)                   | -                                                                                                                                                                                                                  | [Naga Sai Abhinay Devarinti](https://github.com/Abhinay1997/) | 
+| DDIM Noise Comparative Analysis Pipeline | Investigating how the diffusion models learn visual concepts from each noise level (which is a contribution of [P2 weighting (CVPR 2022)](https://arxiv.org/abs/2204.00227)) | [DDIM Noise Comparative Analysis Pipeline](#ddim-noise-comparative-analysis-pipeline) | - |[Aengus (Duc-Anh)](https://github.com/aengusng8) |
+| CLIP Guided Img2Img Stable Diffusion Pipeline | Doing CLIP guidance for image to image generation with Stable Diffusion | [CLIP Guided Img2Img Stable Diffusion](#clip-guided-img2img-stable-diffusion) | - | [Nipun Jindal](https://github.com/nipunjindal/) | 
 
 
 
@@ -44,11 +50,11 @@ The following code requires roughly 12GB of GPU RAM.
 
 ```python
 from diffusers import DiffusionPipeline
-from transformers import CLIPFeatureExtractor, CLIPModel
+from transformers import CLIPImageProcessor, CLIPModel
 import torch
 
 
-feature_extractor = CLIPFeatureExtractor.from_pretrained("laion/CLIP-ViT-B-32-laion2B-s34B-b79K")
+feature_extractor = CLIPImageProcessor.from_pretrained("laion/CLIP-ViT-B-32-laion2B-s34B-b79K")
 clip_model = CLIPModel.from_pretrained("laion/CLIP-ViT-B-32-laion2B-s34B-b79K", torch_dtype=torch.float16)
 
 
@@ -355,43 +361,45 @@ out = pipe(
 import torch as th
 import numpy as np
 import torchvision.utils as tvu
+
 from diffusers import DiffusionPipeline
+
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--prompt", type=str, default="mystical trees | A magical pond | dark",
+                    help="use '|' as the delimiter to compose separate sentences.")
+parser.add_argument("--steps", type=int, default=50)
+parser.add_argument("--scale", type=float, default=7.5)
+parser.add_argument("--weights", type=str, default="7.5 | 7.5 | -7.5")
+parser.add_argument("--seed", type=int, default=2)
+parser.add_argument("--model_path", type=str, default="CompVis/stable-diffusion-v1-4")
+parser.add_argument("--num_images", type=int, default=1)
+args = parser.parse_args()
 
 has_cuda = th.cuda.is_available()
 device = th.device('cpu' if not has_cuda else 'cuda')
 
+prompt = args.prompt
+scale = args.scale
+steps = args.steps
+
 pipe = DiffusionPipeline.from_pretrained(
-    "CompVis/stable-diffusion-v1-4",
-    use_auth_token=True,
+    args.model_path,
     custom_pipeline="composable_stable_diffusion",
 ).to(device)
 
-
-def dummy(images, **kwargs):
-    return images, False
-
-pipe.safety_checker = dummy
+pipe.safety_checker = None
 
 images = []
-generator = torch.Generator("cuda").manual_seed(0)
+generator = th.Generator("cuda").manual_seed(args.seed)
+for i in range(args.num_images):
+    image = pipe(prompt, guidance_scale=scale, num_inference_steps=steps,
+                 weights=args.weights, generator=generator).images[0]
+    images.append(th.from_numpy(np.array(image)).permute(2, 0, 1) / 255.)
+grid = tvu.make_grid(th.stack(images, dim=0), nrow=4, padding=0)
+tvu.save_image(grid, f'{prompt}_{args.weights}' + '.png')
 
-seed = 0
-prompt = "a forest | a camel"
-weights = " 1 | 1"  # Equal weight to each prompt. Can be negative
-
-images = []
-for i in range(4):
-    res = pipe(
-        prompt,
-        guidance_scale=7.5,
-        num_inference_steps=50,
-        weights=weights,
-        generator=generator)
-    image = res.images[0]
-    images.append(image)
-
-for i, img in enumerate(images):
-    img.save(f"./composable_diffusion/image_{i}.png")
 ```
 
 ### Imagic Stable Diffusion
@@ -637,7 +645,6 @@ from diffusers import DiffusionPipeline
 
 from PIL import Image
 import requests
-from torch import autocast
 
 processor = CLIPSegProcessor.from_pretrained("CIDAS/clipseg-rd64-refined")
 model = CLIPSegForImageSegmentation.from_pretrained("CIDAS/clipseg-rd64-refined")
@@ -656,8 +663,7 @@ image = Image.open(requests.get(url, stream=True).raw).resize((512, 512))
 text = "a glass"  # will mask out this text
 prompt = "a cup"  # the masked out region will be replaced with this
 
-with autocast("cuda"):
-    image = pipe(image=image, text=text, prompt=prompt).images[0]
+image = pipe(image=image, text=text, prompt=prompt).images[0]
 ```
 
 ### Bit Diffusion 
@@ -813,6 +819,314 @@ plt.title('Stable Diffusion v1.4')
 plt.axis('off')
 
 plt.show()
-```python
+```
 
 As a result, you can look at a grid of all 4 generated images being shown together, that captures a difference the advancement of the training between the 4 checkpoints.
+
+### Magic Mix
+
+Implementation of the [MagicMix: Semantic Mixing with Diffusion Models](https://arxiv.org/abs/2210.16056) paper. This is a Diffusion Pipeline for semantic mixing of an image and a text prompt to create a new concept while preserving the spatial layout and geometry of the subject in the image. The pipeline takes an image that provides the layout semantics and a prompt that provides the content semantics for the mixing process.
+
+There are 3 parameters for the method-
+- `mix_factor`: It is the interpolation constant used in the layout generation phase. The greater the value of `mix_factor`, the greater the influence of the prompt on the layout generation process.
+- `kmax` and `kmin`: These determine the range for the layout and content generation process. A higher value of kmax results in loss of more information about the layout of the original image and a higher value of kmin results in more steps for content generation process.
+
+Here is an example usage-
+
+```python
+from diffusers import DiffusionPipeline, DDIMScheduler
+from PIL import Image
+
+pipe = DiffusionPipeline.from_pretrained(
+    "CompVis/stable-diffusion-v1-4",
+    custom_pipeline="magic_mix",
+    scheduler = DDIMScheduler.from_pretrained("CompVis/stable-diffusion-v1-4", subfolder="scheduler"),
+).to('cuda')
+
+img = Image.open('phone.jpg')
+mix_img = pipe(
+    img, 
+    prompt = 'bed', 
+    kmin = 0.3,
+    kmax = 0.5,
+    mix_factor = 0.5,
+    )
+mix_img.save('phone_bed_mix.jpg')
+```
+The `mix_img` is a PIL image that can be saved locally or displayed directly in a google colab. Generated image is a mix of the layout semantics of the given image and the content semantics of the prompt.
+
+E.g. the above script generates the following image:
+
+`phone.jpg`
+
+![206903102-34e79b9f-9ed2-4fac-bb38-82871343c655](https://user-images.githubusercontent.com/59410571/209578593-141467c7-d831-4792-8b9a-b17dc5e47816.jpg)
+
+`phone_bed_mix.jpg`
+
+![206903104-913a671d-ef53-4ae4-919d-64c3059c8f67](https://user-images.githubusercontent.com/59410571/209578602-70f323fa-05b7-4dd6-b055-e40683e37914.jpg)
+
+For more example generations check out this [demo notebook](https://github.com/daspartho/MagicMix/blob/main/demo.ipynb).
+
+
+### Stable UnCLIP
+
+UnCLIPPipeline("kakaobrain/karlo-v1-alpha") provide a prior model that can generate clip image embedding from text.
+StableDiffusionImageVariationPipeline("lambdalabs/sd-image-variations-diffusers") provide a decoder model than can generate images from clip image embedding.
+
+```python
+import torch
+from diffusers import DiffusionPipeline
+
+device = torch.device("cpu" if not torch.cuda.is_available() else "cuda")
+
+pipeline = DiffusionPipeline.from_pretrained(
+    "kakaobrain/karlo-v1-alpha",
+    torch_dtype=torch.float16,
+    custom_pipeline="stable_unclip",
+    decoder_pipe_kwargs=dict(
+        image_encoder=None,
+    ),
+)
+pipeline.to(device)
+
+prompt = "a shiba inu wearing a beret and black turtleneck"
+random_generator = torch.Generator(device=device).manual_seed(1000)
+output = pipeline(
+    prompt=prompt,
+    width=512,
+    height=512,
+    generator=random_generator,
+    prior_guidance_scale=4,
+    prior_num_inference_steps=25,
+    decoder_guidance_scale=8,
+    decoder_num_inference_steps=50,
+)
+
+image = output.images[0]
+image.save("./shiba-inu.jpg")
+
+# debug
+
+# `pipeline.decoder_pipe` is a regular StableDiffusionImageVariationPipeline instance.
+# It is used to convert clip image embedding to latents, then fed into VAE decoder.
+print(pipeline.decoder_pipe.__class__)
+# <class 'diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_image_variation.StableDiffusionImageVariationPipeline'>
+
+# this pipeline only use prior module in "kakaobrain/karlo-v1-alpha"
+# It is used to convert clip text embedding to clip image embedding.
+print(pipeline)
+# StableUnCLIPPipeline {
+#   "_class_name": "StableUnCLIPPipeline",
+#   "_diffusers_version": "0.12.0.dev0",
+#   "prior": [
+#     "diffusers",
+#     "PriorTransformer"
+#   ],
+#   "prior_scheduler": [
+#     "diffusers",
+#     "UnCLIPScheduler"
+#   ],
+#   "text_encoder": [
+#     "transformers",
+#     "CLIPTextModelWithProjection"
+#   ],
+#   "tokenizer": [
+#     "transformers",
+#     "CLIPTokenizer"
+#   ]
+# }
+
+# pipeline.prior_scheduler is the scheduler used for prior in UnCLIP.
+print(pipeline.prior_scheduler)
+# UnCLIPScheduler {
+#   "_class_name": "UnCLIPScheduler",
+#   "_diffusers_version": "0.12.0.dev0",
+#   "clip_sample": true,
+#   "clip_sample_range": 5.0,
+#   "num_train_timesteps": 1000,
+#   "prediction_type": "sample",
+#   "variance_type": "fixed_small_log"
+# }
+```
+
+
+`shiba-inu.jpg`
+
+
+![shiba-inu](https://user-images.githubusercontent.com/16448529/209185639-6e5ec794-ce9d-4883-aa29-bd6852a2abad.jpg)
+
+### UnCLIP Text Interpolation Pipeline
+
+This Diffusion Pipeline takes two prompts and interpolates between the two input prompts using spherical interpolation ( slerp ). The input prompts are converted to text embeddings by the pipeline's text_encoder and the interpolation is done on the resulting text_embeddings over the number of steps specified. Defaults to 5 steps. 
+
+```python
+import torch
+from diffusers import DiffusionPipeline
+
+device = torch.device("cpu" if not torch.cuda.is_available() else "cuda")
+
+pipe = DiffusionPipeline.from_pretrained(
+    "kakaobrain/karlo-v1-alpha",
+    torch_dtype=torch.float16,
+    custom_pipeline="unclip_text_interpolation"
+)
+pipe.to(device)
+
+start_prompt = "A photograph of an adult lion"
+end_prompt = "A photograph of a lion cub"
+#For best results keep the prompts close in length to each other. Of course, feel free to try out with differing lengths.
+generator = torch.Generator(device=device).manual_seed(42)
+
+output = pipe(start_prompt, end_prompt, steps = 6, generator = generator, enable_sequential_cpu_offload=False)
+
+for i,image in enumerate(output.images):
+    img.save('result%s.jpg' % i)
+```
+
+The resulting images in order:-
+
+![result_0](https://huggingface.co/datasets/NagaSaiAbhinay/UnCLIPTextInterpolationSamples/resolve/main/lion_to_cub_0.png)
+![result_1](https://huggingface.co/datasets/NagaSaiAbhinay/UnCLIPTextInterpolationSamples/resolve/main/lion_to_cub_1.png)
+![result_2](https://huggingface.co/datasets/NagaSaiAbhinay/UnCLIPTextInterpolationSamples/resolve/main/lion_to_cub_2.png)
+![result_3](https://huggingface.co/datasets/NagaSaiAbhinay/UnCLIPTextInterpolationSamples/resolve/main/lion_to_cub_3.png)
+![result_4](https://huggingface.co/datasets/NagaSaiAbhinay/UnCLIPTextInterpolationSamples/resolve/main/lion_to_cub_4.png)
+![result_5](https://huggingface.co/datasets/NagaSaiAbhinay/UnCLIPTextInterpolationSamples/resolve/main/lion_to_cub_5.png)
+
+### UnCLIP Image Interpolation Pipeline
+
+This Diffusion Pipeline takes two images or an image_embeddings tensor of size 2 and interpolates between their embeddings using spherical interpolation ( slerp ). The input images/image_embeddings are converted to image embeddings by the pipeline's image_encoder and the interpolation is done on the resulting image_embeddings over the number of steps specified. Defaults to 5 steps. 
+
+```python
+import torch
+from diffusers import DiffusionPipeline
+from PIL import Image
+
+device = torch.device("cpu" if not torch.cuda.is_available() else "cuda")
+dtype = torch.float16 if torch.cuda.is_available() else torch.bfloat16
+
+pipe = DiffusionPipeline.from_pretrained(
+    "kakaobrain/karlo-v1-alpha-image-variations",
+    torch_dtype=dtype,
+    custom_pipeline="unclip_image_interpolation"
+)
+pipe.to(device)
+
+images = [Image.open('./starry_night.jpg'), Image.open('./flowers.jpg')]
+#For best results keep the prompts close in length to each other. Of course, feel free to try out with differing lengths.
+generator = torch.Generator(device=device).manual_seed(42)
+
+output = pipe(image = images ,steps = 6, generator = generator)
+
+for i,image in enumerate(output.images):
+    image.save('starry_to_flowers_%s.jpg' % i)
+```
+The original images:-
+
+![starry](https://huggingface.co/datasets/NagaSaiAbhinay/UnCLIPImageInterpolationSamples/resolve/main/starry_night.jpg)
+![flowers](https://huggingface.co/datasets/NagaSaiAbhinay/UnCLIPImageInterpolationSamples/resolve/main/flowers.jpg)
+
+The resulting images in order:-
+
+![result0](https://huggingface.co/datasets/NagaSaiAbhinay/UnCLIPImageInterpolationSamples/resolve/main/starry_to_flowers_0.png)
+![result1](https://huggingface.co/datasets/NagaSaiAbhinay/UnCLIPImageInterpolationSamples/resolve/main/starry_to_flowers_1.png)
+![result2](https://huggingface.co/datasets/NagaSaiAbhinay/UnCLIPImageInterpolationSamples/resolve/main/starry_to_flowers_2.png)
+![result3](https://huggingface.co/datasets/NagaSaiAbhinay/UnCLIPImageInterpolationSamples/resolve/main/starry_to_flowers_3.png)
+![result4](https://huggingface.co/datasets/NagaSaiAbhinay/UnCLIPImageInterpolationSamples/resolve/main/starry_to_flowers_4.png)
+![result5](https://huggingface.co/datasets/NagaSaiAbhinay/UnCLIPImageInterpolationSamples/resolve/main/starry_to_flowers_5.png)
+
+### DDIM Noise Comparative Analysis Pipeline
+#### **Research question: What visual concepts do the diffusion models learn from each noise level during training?**  
+The [P2 weighting (CVPR 2022)](https://arxiv.org/abs/2204.00227) paper proposed an approach to answer the above question, which is their second contribution.  
+The approach consists of the following steps:
+
+1. The input is an image x0.
+2. Perturb it to xt using a diffusion process q(xt|x0).
+    - `strength` is a value between 0.0 and 1.0, that controls the amount of noise that is added to the input image. Values that approach 1.0 allow for lots of variations but will also produce images that are not semantically consistent with the input.
+3. Reconstruct the image with the learned denoising process pθ(ˆx0|xt).
+4. Compare x0 and ˆx0 among various t to show how each step contributes to the sample.
+The authors used [openai/guided-diffusion](https://github.com/openai/guided-diffusion) model to denoise images in FFHQ dataset. This pipeline extends their second contribution by investigating DDIM on any input image.
+
+```python
+import torch
+from PIL import Image
+import numpy as np
+
+image_path = "path/to/your/image" # images from CelebA-HQ might be better
+image_pil = Image.open(image_path)
+image_name = image_path.split("/")[-1].split(".")[0]
+
+device = torch.device("cpu" if not torch.cuda.is_available() else "cuda")
+pipe = DiffusionPipeline.from_pretrained(
+    "google/ddpm-ema-celebahq-256",
+    custom_pipeline="ddim_noise_comparative_analysis",
+)
+pipe = pipe.to(device)
+
+for strength in np.linspace(0.1, 1, 25):
+    denoised_image, latent_timestep = pipe(
+        image_pil, strength=strength, return_dict=False
+    )
+    denoised_image = denoised_image[0]
+    denoised_image.save(
+        f"noise_comparative_analysis_{image_name}_{latent_timestep}.png"
+    )
+```
+
+Here is the result of this pipeline (which is DDIM) on CelebA-HQ dataset.
+
+![noise-comparative-analysis](https://user-images.githubusercontent.com/67547213/224677066-4474b2ed-56ab-4c27-87c6-de3c0255eb9c.jpeg)
+
+### CLIP Guided Img2Img Stable Diffusion
+
+CLIP guided Img2Img stable diffusion can help to generate more realistic images with an initial image 
+by guiding stable diffusion at every denoising step with an additional CLIP model.
+
+The following code requires roughly 12GB of GPU RAM.
+
+```python
+from io import BytesIO
+import requests
+import torch
+from diffusers import DiffusionPipeline
+from PIL import Image
+from transformers import CLIPFeatureExtractor, CLIPModel
+feature_extractor = CLIPFeatureExtractor.from_pretrained(
+    "laion/CLIP-ViT-B-32-laion2B-s34B-b79K"
+)
+clip_model = CLIPModel.from_pretrained(
+    "laion/CLIP-ViT-B-32-laion2B-s34B-b79K", torch_dtype=torch.float16
+)
+guided_pipeline = DiffusionPipeline.from_pretrained(
+    "CompVis/stable-diffusion-v1-4",
+    # custom_pipeline="clip_guided_stable_diffusion",
+    custom_pipeline="/home/njindal/diffusers/examples/community/clip_guided_stable_diffusion.py",
+    clip_model=clip_model,
+    feature_extractor=feature_extractor,
+    torch_dtype=torch.float16,
+)
+guided_pipeline.enable_attention_slicing()
+guided_pipeline = guided_pipeline.to("cuda")
+prompt = "fantasy book cover, full moon, fantasy forest landscape, golden vector elements, fantasy magic, dark light night, intricate, elegant, sharp focus, illustration, highly detailed, digital painting, concept art, matte, art by WLOP and Artgerm and Albert Bierstadt, masterpiece"
+url = "https://raw.githubusercontent.com/CompVis/stable-diffusion/main/assets/stable-samples/img2img/sketch-mountains-input.jpg"
+response = requests.get(url)
+init_image = Image.open(BytesIO(response.content)).convert("RGB")
+image = guided_pipeline(
+    prompt=prompt,
+    num_inference_steps=30,
+    image=init_image,
+    strength=0.75,
+    guidance_scale=7.5,
+    clip_guidance_scale=100,
+    num_cutouts=4,
+    use_cutouts=False,
+).images[0]
+display(image)
+```
+
+Init Image
+
+![img2img_init_clip_guidance](https://huggingface.co/datasets/njindal/images/resolve/main/clip_guided_img2img_init.jpg)
+
+Output Image
+
+![img2img_clip_guidance](https://huggingface.co/datasets/njindal/images/resolve/main/clip_guided_img2img.jpg)

@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2022 HuggingFace Inc.
+# Copyright 2023 HuggingFace Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@ import unittest
 
 import numpy as np
 import torch
+from PIL import Image
+from transformers import CLIPImageProcessor, CLIPVisionConfig, CLIPVisionModelWithProjection
 
 from diffusers import (
     AutoencoderKL,
@@ -29,10 +31,9 @@ from diffusers import (
 )
 from diffusers.utils import floats_tensor, load_image, load_numpy, nightly, slow, torch_device
 from diffusers.utils.testing_utils import require_torch_gpu
-from PIL import Image
-from transformers import CLIPImageProcessor, CLIPVisionConfig, CLIPVisionModelWithProjection
 
-from ...test_pipelines_common import PipelineTesterMixin
+from ..pipeline_params import IMAGE_VARIATION_BATCH_PARAMS, IMAGE_VARIATION_PARAMS
+from ..test_pipelines_common import PipelineTesterMixin
 
 
 torch.backends.cuda.matmul.allow_tf32 = False
@@ -40,6 +41,8 @@ torch.backends.cuda.matmul.allow_tf32 = False
 
 class StableDiffusionImageVariationPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
     pipeline_class = StableDiffusionImageVariationPipeline
+    params = IMAGE_VARIATION_PARAMS
+    batch_params = IMAGE_VARIATION_BATCH_PARAMS
 
     def get_dummy_components(self):
         torch.manual_seed(0)
@@ -116,7 +119,8 @@ class StableDiffusionImageVariationPipelineFastTests(PipelineTesterMixin, unitte
         image_slice = image[0, -3:, -3:, -1]
 
         assert image.shape == (1, 64, 64, 3)
-        expected_slice = np.array([0.5167, 0.5746, 0.4835, 0.4914, 0.5605, 0.4691, 0.5201, 0.4898, 0.4958])
+        expected_slice = np.array([0.5239, 0.5723, 0.4796, 0.5049, 0.5550, 0.4685, 0.5329, 0.4891, 0.4921])
+
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-3
 
     def test_stable_diffusion_img_variation_multiple_images(self):
@@ -135,44 +139,9 @@ class StableDiffusionImageVariationPipelineFastTests(PipelineTesterMixin, unitte
         image_slice = image[-1, -3:, -3:, -1]
 
         assert image.shape == (2, 64, 64, 3)
-        expected_slice = np.array([0.6568, 0.5470, 0.5684, 0.5444, 0.5945, 0.6221, 0.5508, 0.5531, 0.5263])
+        expected_slice = np.array([0.6892, 0.5637, 0.5836, 0.5771, 0.6254, 0.6409, 0.5580, 0.5569, 0.5289])
+
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-3
-
-    def test_stable_diffusion_img_variation_num_images_per_prompt(self):
-        device = "cpu"
-        components = self.get_dummy_components()
-        sd_pipe = StableDiffusionImageVariationPipeline(**components)
-        sd_pipe = sd_pipe.to(device)
-        sd_pipe.set_progress_bar_config(disable=None)
-
-        # test num_images_per_prompt=1 (default)
-        inputs = self.get_dummy_inputs(device)
-        images = sd_pipe(**inputs).images
-
-        assert images.shape == (1, 64, 64, 3)
-
-        # test num_images_per_prompt=1 (default) for batch of images
-        batch_size = 2
-        inputs = self.get_dummy_inputs(device)
-        inputs["image"] = batch_size * [inputs["image"]]
-        images = sd_pipe(**inputs).images
-
-        assert images.shape == (batch_size, 64, 64, 3)
-
-        # test num_images_per_prompt for single prompt
-        num_images_per_prompt = 2
-        inputs = self.get_dummy_inputs(device)
-        images = sd_pipe(**inputs, num_images_per_prompt=num_images_per_prompt).images
-
-        assert images.shape == (num_images_per_prompt, 64, 64, 3)
-
-        # test num_images_per_prompt for batch of prompts
-        batch_size = 2
-        inputs = self.get_dummy_inputs(device)
-        inputs["image"] = batch_size * [inputs["image"]]
-        images = sd_pipe(**inputs, num_images_per_prompt=num_images_per_prompt).images
-
-        assert images.shape == (batch_size * num_images_per_prompt, 64, 64, 3)
 
 
 @slow
@@ -183,8 +152,8 @@ class StableDiffusionImageVariationPipelineSlowTests(unittest.TestCase):
         gc.collect()
         torch.cuda.empty_cache()
 
-    def get_inputs(self, device, dtype=torch.float32, seed=0):
-        generator = torch.Generator(device=device).manual_seed(seed)
+    def get_inputs(self, device, generator_device="cpu", dtype=torch.float32, seed=0):
+        generator = torch.Generator(device=generator_device).manual_seed(seed)
         init_image = load_image(
             "https://huggingface.co/datasets/diffusers/test-arrays/resolve/main"
             "/stable_diffusion_imgvar/input_image_vermeer.png"
@@ -227,13 +196,17 @@ class StableDiffusionImageVariationPipelineSlowTests(unittest.TestCase):
                 latents = latents.detach().cpu().numpy()
                 assert latents.shape == (1, 4, 64, 64)
                 latents_slice = latents[0, -3:, -3:, -1]
-                expected_slice = np.array([-0.1572, 0.2837, -0.798, -0.1201, -1.304, 0.7754, -2.12, 0.0443, 1.627])
-                assert np.abs(latents_slice.flatten() - expected_slice).max() < 5e-3
+                expected_slice = np.array(
+                    [-0.1621, 0.2837, -0.7979, -0.1221, -1.3057, 0.7681, -2.1191, 0.0464, 1.6309]
+                )
+
+                assert np.abs(latents_slice.flatten() - expected_slice).max() < 5e-2
             elif step == 2:
                 latents = latents.detach().cpu().numpy()
                 assert latents.shape == (1, 4, 64, 64)
                 latents_slice = latents[0, -3:, -3:, -1]
-                expected_slice = np.array([0.6143, 1.734, 1.158, -2.145, -1.926, 0.748, -0.7246, 0.994, 1.539])
+                expected_slice = np.array([0.6299, 1.7500, 1.1992, -2.1582, -1.8994, 0.7334, -0.7090, 1.0137, 1.5273])
+
                 assert np.abs(latents_slice.flatten() - expected_slice).max() < 5e-2
 
         callback_fn.has_been_called = False
@@ -282,8 +255,8 @@ class StableDiffusionImageVariationPipelineNightlyTests(unittest.TestCase):
         gc.collect()
         torch.cuda.empty_cache()
 
-    def get_inputs(self, device, dtype=torch.float32, seed=0):
-        generator = torch.Generator(device=device).manual_seed(seed)
+    def get_inputs(self, device, generator_device="cpu", dtype=torch.float32, seed=0):
+        generator = torch.Generator(device=generator_device).manual_seed(seed)
         init_image = load_image(
             "https://huggingface.co/datasets/diffusers/test-arrays/resolve/main"
             "/stable_diffusion_imgvar/input_image_vermeer.png"

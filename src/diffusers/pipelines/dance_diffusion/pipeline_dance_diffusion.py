@@ -1,4 +1,4 @@
-# Copyright 2022 The HuggingFace Team. All rights reserved.
+# Copyright 2023 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,8 +17,8 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 
-from ...pipeline_utils import AudioPipelineOutput, DiffusionPipeline
-from ...utils import logging
+from ...utils import logging, randn_tensor
+from ..pipeline_utils import AudioPipelineOutput, DiffusionPipeline
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -61,56 +61,48 @@ class DanceDiffusionPipeline(DiffusionPipeline):
                 to make generation deterministic.
             audio_length_in_s (`float`, *optional*, defaults to `self.unet.config.sample_size/self.unet.config.sample_rate`):
                 The length of the generated audio sample in seconds. Note that the output of the pipeline, *i.e.*
-                `sample_size`, will be `audio_length_in_s` * `self.unet.sample_rate`.
+                `sample_size`, will be `audio_length_in_s` * `self.unet.config.sample_rate`.
             return_dict (`bool`, *optional*, defaults to `True`):
-                Whether or not to return a [`~pipeline_utils.AudioPipelineOutput`] instead of a plain tuple.
+                Whether or not to return a [`~pipelines.AudioPipelineOutput`] instead of a plain tuple.
 
         Returns:
-            [`~pipeline_utils.AudioPipelineOutput`] or `tuple`: [`~pipelines.utils.AudioPipelineOutput`] if
-            `return_dict` is True, otherwise a `tuple. When returning a tuple, the first element is a list with the
-            generated images.
+            [`~pipelines.AudioPipelineOutput`] or `tuple`: [`~pipelines.utils.AudioPipelineOutput`] if `return_dict` is
+            True, otherwise a `tuple. When returning a tuple, the first element is a list with the generated images.
         """
 
         if audio_length_in_s is None:
             audio_length_in_s = self.unet.config.sample_size / self.unet.config.sample_rate
 
-        sample_size = audio_length_in_s * self.unet.sample_rate
+        sample_size = audio_length_in_s * self.unet.config.sample_rate
 
         down_scale_factor = 2 ** len(self.unet.up_blocks)
         if sample_size < 3 * down_scale_factor:
             raise ValueError(
                 f"{audio_length_in_s} is too small. Make sure it's bigger or equal to"
-                f" {3 * down_scale_factor / self.unet.sample_rate}."
+                f" {3 * down_scale_factor / self.unet.config.sample_rate}."
             )
 
         original_sample_size = int(sample_size)
         if sample_size % down_scale_factor != 0:
-            sample_size = ((audio_length_in_s * self.unet.sample_rate) // down_scale_factor + 1) * down_scale_factor
+            sample_size = (
+                (audio_length_in_s * self.unet.config.sample_rate) // down_scale_factor + 1
+            ) * down_scale_factor
             logger.info(
-                f"{audio_length_in_s} is increased to {sample_size / self.unet.sample_rate} so that it can be handled"
-                f" by the model. It will be cut to {original_sample_size / self.unet.sample_rate} after the denoising"
+                f"{audio_length_in_s} is increased to {sample_size / self.unet.config.sample_rate} so that it can be handled"
+                f" by the model. It will be cut to {original_sample_size / self.unet.config.sample_rate} after the denoising"
                 " process."
             )
         sample_size = int(sample_size)
 
         dtype = next(iter(self.unet.parameters())).dtype
-        shape = (batch_size, self.unet.in_channels, sample_size)
+        shape = (batch_size, self.unet.config.in_channels, sample_size)
         if isinstance(generator, list) and len(generator) != batch_size:
             raise ValueError(
                 f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
                 f" size of {batch_size}. Make sure the batch size matches the length of the generators."
             )
 
-        rand_device = "cpu" if self.device.type == "mps" else self.device
-        if isinstance(generator, list):
-            shape = (1,) + shape[1:]
-            audio = [
-                torch.randn(shape, generator=generator[i], device=rand_device, dtype=self.unet.dtype)
-                for i in range(batch_size)
-            ]
-            audio = torch.cat(audio, dim=0).to(self.device)
-        else:
-            audio = torch.randn(shape, generator=generator, device=rand_device, dtype=dtype).to(self.device)
+        audio = randn_tensor(shape, generator=generator, device=self.device, dtype=dtype)
 
         # set step values
         self.scheduler.set_timesteps(num_inference_steps, device=audio.device)
