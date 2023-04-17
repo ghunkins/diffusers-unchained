@@ -1,4 +1,4 @@
-# Copyright 2022 Google Brain and The HuggingFace Team. All rights reserved.
+# Copyright 2023 Google Brain and The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ from typing import Optional, Tuple, Union
 import torch
 
 from ..configuration_utils import ConfigMixin, register_to_config
-from ..utils import BaseOutput
+from ..utils import BaseOutput, randn_tensor
 from .scheduling_utils import SchedulerMixin, SchedulerOutput
 
 
@@ -109,7 +109,8 @@ class ScoreSdeVeScheduler(SchedulerMixin, ConfigMixin):
         Args:
             num_inference_steps (`int`):
                 the number of diffusion steps used when generating samples with a pre-trained model.
-            sampling_eps (`float`, optional): final timestep value (overrides value given at Scheduler instantiation).
+            sampling_eps (`float`, optional):
+                final timestep value (overrides value given at Scheduler instantiation).
 
         """
         sampling_eps = sampling_eps if sampling_eps is not None else self.config.sampling_eps
@@ -129,8 +130,10 @@ class ScoreSdeVeScheduler(SchedulerMixin, ConfigMixin):
                 the number of diffusion steps used when generating samples with a pre-trained model.
             sigma_min (`float`, optional):
                 initial noise scale value (overrides value given at Scheduler instantiation).
-            sigma_max (`float`, optional): final noise scale value (overrides value given at Scheduler instantiation).
-            sampling_eps (`float`, optional): final timestep value (overrides value given at Scheduler instantiation).
+            sigma_max (`float`, optional):
+                final noise scale value (overrides value given at Scheduler instantiation).
+            sampling_eps (`float`, optional):
+                final timestep value (overrides value given at Scheduler instantiation).
 
         """
         sigma_min = sigma_min if sigma_min is not None else self.config.sigma_min
@@ -201,7 +204,9 @@ class ScoreSdeVeScheduler(SchedulerMixin, ConfigMixin):
         drift = drift - diffusion**2 * model_output
 
         #  equation 6: sample noise for the diffusion term of
-        noise = torch.randn(sample.shape, layout=sample.layout, generator=generator).to(sample.device)
+        noise = randn_tensor(
+            sample.shape, layout=sample.layout, generator=generator, device=sample.device, dtype=sample.dtype
+        )
         prev_sample_mean = sample - drift  # subtract because `dt` is a small negative timestep
         # TODO is the variable diffusion the correct scaling term for the noise?
         prev_sample = prev_sample_mean + diffusion * noise  # add impact of diffusion field g
@@ -241,7 +246,7 @@ class ScoreSdeVeScheduler(SchedulerMixin, ConfigMixin):
 
         # For small batch sizes, the paper "suggest replacing norm(z) with sqrt(d), where d is the dim. of z"
         # sample noise for correction
-        noise = torch.randn(sample.shape, layout=sample.layout, generator=generator).to(sample.device)
+        noise = randn_tensor(sample.shape, layout=sample.layout, generator=generator).to(sample.device)
 
         # compute step size from the model_output, the noise, and the snr
         grad_norm = torch.norm(model_output.reshape(model_output.shape[0], -1), dim=-1).mean()
@@ -261,6 +266,19 @@ class ScoreSdeVeScheduler(SchedulerMixin, ConfigMixin):
             return (prev_sample,)
 
         return SchedulerOutput(prev_sample=prev_sample)
+
+    def add_noise(
+        self,
+        original_samples: torch.FloatTensor,
+        noise: torch.FloatTensor,
+        timesteps: torch.FloatTensor,
+    ) -> torch.FloatTensor:
+        # Make sure sigmas and timesteps have the same device and dtype as original_samples
+        timesteps = timesteps.to(original_samples.device)
+        sigmas = self.discrete_sigmas.to(original_samples.device)[timesteps]
+        noise = torch.randn_like(original_samples) * sigmas[:, None, None, None]
+        noisy_samples = noise + original_samples
+        return noisy_samples
 
     def __len__(self):
         return self.config.num_train_timesteps

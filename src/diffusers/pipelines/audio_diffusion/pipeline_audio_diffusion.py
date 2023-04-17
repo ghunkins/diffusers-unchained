@@ -1,4 +1,4 @@
-# Copyright 2022 The HuggingFace Team. All rights reserved.
+# Copyright 2023 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,12 +18,12 @@ from typing import List, Tuple, Union
 
 import numpy as np
 import torch
-
 from PIL import Image
 
 from ...models import AutoencoderKL, UNet2DConditionModel
-from ...pipeline_utils import AudioPipelineOutput, BaseOutput, DiffusionPipeline, ImagePipelineOutput
 from ...schedulers import DDIMScheduler, DDPMScheduler
+from ...utils import randn_tensor
+from ..pipeline_utils import AudioPipelineOutput, BaseOutput, DiffusionPipeline, ImagePipelineOutput
 from .mel import Mel
 
 
@@ -60,9 +60,9 @@ class AudioDiffusionPipeline(DiffusionPipeline):
         input_module = self.vqvae if self.vqvae is not None else self.unet
         # For backwards compatibility
         sample_size = (
-            (input_module.sample_size, input_module.sample_size)
-            if type(input_module.sample_size) == int
-            else input_module.sample_size
+            (input_module.config.sample_size, input_module.config.sample_size)
+            if type(input_module.config.sample_size) == int
+            else input_module.config.sample_size
         )
         return sample_size
 
@@ -89,9 +89,11 @@ class AudioDiffusionPipeline(DiffusionPipeline):
         step_generator: torch.Generator = None,
         eta: float = 0,
         noise: torch.Tensor = None,
+        encoding: torch.Tensor = None,
         return_dict=True,
     ) -> Union[
-        Union[AudioPipelineOutput, ImagePipelineOutput], Tuple[List[Image.Image], Tuple[int, List[np.ndarray]]]
+        Union[AudioPipelineOutput, ImagePipelineOutput],
+        Tuple[List[Image.Image], Tuple[int, List[np.ndarray]]],
     ]:
         """Generate random mel spectrogram from audio input and convert to audio.
 
@@ -108,6 +110,7 @@ class AudioDiffusionPipeline(DiffusionPipeline):
             step_generator (`torch.Generator`): random number generator used to de-noise or None
             eta (`float`): parameter between 0 and 1 used with DDIM scheduler
             noise (`torch.Tensor`): noise tensor of shape (batch_size, 1, height, width) or None
+            encoding (`torch.Tensor`): for UNet2DConditionModel shape (batch_size, seq_length, cross_attention_dim)
             return_dict (`bool`): if True return AudioPipelineOutput, ImagePipelineOutput else Tuple
 
         Returns:
@@ -118,13 +121,18 @@ class AudioDiffusionPipeline(DiffusionPipeline):
         self.scheduler.set_timesteps(steps)
         step_generator = step_generator or generator
         # For backwards compatibility
-        if type(self.unet.sample_size) == int:
-            self.unet.sample_size = (self.unet.sample_size, self.unet.sample_size)
+        if type(self.unet.config.sample_size) == int:
+            self.unet.config.sample_size = (self.unet.config.sample_size, self.unet.config.sample_size)
         input_dims = self.get_input_dims()
         self.mel.set_resolution(x_res=input_dims[1], y_res=input_dims[0])
         if noise is None:
-            noise = torch.randn(
-                (batch_size, self.unet.in_channels, self.unet.sample_size[0], self.unet.sample_size[1]),
+            noise = randn_tensor(
+                (
+                    batch_size,
+                    self.unet.config.in_channels,
+                    self.unet.config.sample_size[0],
+                    self.unet.config.sample_size[1],
+                ),
                 generator=generator,
                 device=self.device,
             )
@@ -144,28 +152,38 @@ class AudioDiffusionPipeline(DiffusionPipeline):
                 input_images = self.vqvae.encode(torch.unsqueeze(input_images, 0)).latent_dist.sample(
                     generator=generator
                 )[0]
-                input_images = 0.18215 * input_images
+                input_images = self.vqvae.config.scaling_factor * input_images
 
             if start_step > 0:
                 images[0, 0] = self.scheduler.add_noise(input_images, noise, self.scheduler.timesteps[start_step - 1])
 
             pixels_per_second = (
-                self.unet.sample_size[1] * self.mel.get_sample_rate() / self.mel.x_res / self.mel.hop_length
+                self.unet.config.sample_size[1] * self.mel.get_sample_rate() / self.mel.x_res / self.mel.hop_length
             )
             mask_start = int(mask_start_secs * pixels_per_second)
             mask_end = int(mask_end_secs * pixels_per_second)
             mask = self.scheduler.add_noise(input_images, noise, torch.tensor(self.scheduler.timesteps[start_step:]))
 
         for step, t in enumerate(self.progress_bar(self.scheduler.timesteps[start_step:])):
-            model_output = self.unet(images, t)["sample"]
+            if isinstance(self.unet, UNet2DConditionModel):
+                model_output = self.unet(images, t, encoding)["sample"]
+            else:
+                model_output = self.unet(images, t)["sample"]
 
             if isinstance(self.scheduler, DDIMScheduler):
                 images = self.scheduler.step(
-                    model_output=model_output, timestep=t, sample=images, eta=eta, generator=step_generator
+                    model_output=model_output,
+                    timestep=t,
+                    sample=images,
+                    eta=eta,
+                    generator=step_generator,
                 )["prev_sample"]
             else:
                 images = self.scheduler.step(
-                    model_output=model_output, timestep=t, sample=images, generator=step_generator
+                    model_output=model_output,
+                    timestep=t,
+                    sample=images,
+                    generator=step_generator,
                 )["prev_sample"]
 
             if mask is not None:
@@ -176,19 +194,19 @@ class AudioDiffusionPipeline(DiffusionPipeline):
 
         if self.vqvae is not None:
             # 0.18215 was scaling factor used in training to ensure unit variance
-            images = 1 / 0.18215 * images
+            images = 1 / self.vqvae.config.scaling_factor * images
             images = self.vqvae.decode(images)["sample"]
 
         images = (images / 2 + 0.5).clamp(0, 1)
         images = images.cpu().permute(0, 2, 3, 1).numpy()
         images = (images * 255).round().astype("uint8")
         images = list(
-            map(lambda _: Image.fromarray(_[:, :, 0]), images)
+            (Image.fromarray(_[:, :, 0]) for _ in images)
             if images.shape[3] == 1
-            else map(lambda _: Image.fromarray(_, mode="RGB").convert("L"), images)
+            else (Image.fromarray(_, mode="RGB").convert("L") for _ in images)
         )
 
-        audios = list(map(lambda _: self.mel.image_to_audio(_), images))
+        audios = [self.mel.image_to_audio(_) for _ in images]
         if not return_dict:
             return images, (self.mel.get_sample_rate(), audios)
 

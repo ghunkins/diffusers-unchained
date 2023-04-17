@@ -1,7 +1,7 @@
-accelerate
+accelerate>=0.16.0
 torchvision
 transformers>=4.21.0
 ftfy
 tensorboard
-modelcards
+Jinja2
 intel_extension_for_pytorch>=1.13
